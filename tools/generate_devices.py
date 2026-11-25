@@ -1,9 +1,9 @@
-"""Generate Sources/Mouser/DeviceTable.swift from openrazer data.
+"""Generate Sources/MouseR/DeviceTable.swift from openrazer data.
 
 Usage: python3 -I tools/generate_devices.py <driver_table.json> <daemon_table.json> <out.swift> <report.md>
 Inputs come from parse_driver.py (razermouse_driver.c) and parse_daemon.py (daemon hardware/mouse.py).
 
-Only command families that Mouser implements are emitted; anything else is left out and listed in the report.
+Only command families that MouseR implements are emitted; anything else is left out and listed in the report.
 Derived from openrazer (GPL-2.0-or-later), https://github.com/openrazer/openrazer
 """
 import json, sys
@@ -213,7 +213,7 @@ extension DeviceCatalog {{
 open(sys.argv[3], "w").write(swift)
 
 with open(sys.argv[4], "w") as r:
-    r.write(f"# Device table report\n\n{len(out_specs)} mice generated. Features left out (not implemented in Mouser):\n\n")
+    r.write(f"# Device table report\n\n{len(out_specs)} mice generated. Features left out (not implemented in MouseR):\n\n")
     r.write("| Mouse | Feature | Reason |\n|---|---|---|\n")
     for t, f, why in skipped:
         r.write(f"| {t} | {f} | {why} |\n")

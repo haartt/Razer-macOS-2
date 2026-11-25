@@ -1,6 +1,6 @@
 # Device table report
 
-121 mice generated. Features left out (not implemented in Mouser):
+121 mice generated. Features left out (not implemented in MouseR):
 
 | Mouse | Feature | Reason |
 |---|---|---|

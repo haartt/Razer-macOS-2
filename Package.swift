@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Mouser",
+    name: "MouseR",
     platforms: [.macOS(.v14)],
     targets: [
         .target(
@@ -11,9 +11,9 @@ let package = Package(
             linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]
         ),
         .executableTarget(
-            name: "Mouser",
+            name: "MouseR",
             dependencies: ["RazerUSB"],
-            path: "Sources/Mouser",
+            path: "Sources/MouseR",
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("ApplicationServices"),
