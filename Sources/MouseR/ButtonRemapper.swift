@@ -28,15 +28,35 @@ enum ButtonAction: String, CaseIterable, Identifiable {
     }
 }
 
+/// What the event tap callback reads. The tap runs on its own thread, so a busy main thread
+/// (USB reads, UI, Accessibility calls) can never hold up mouse events: the callback only decides
+/// pass or swallow and returns at once; the action itself runs later on the main thread.
+final class TapContext: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _mapping: [Int: ButtonAction] = [:]
+    var mapping: [Int: ButtonAction] {
+        get { lock.withLock { _mapping } }
+        set { lock.withLock { _mapping = newValue } }
+    }
+    var tap: CFMachPort?
+    var runLoop: CFRunLoop?
+    var onAction: ((ButtonAction, Bool) -> Void)? // (action, isDown), called on the main thread
+}
+
 /// Remaps mouse buttons with a CGEventTap. Needs Accessibility permission.
 /// Note: applies to these buttons on any connected mouse.
 @MainActor
 final class ButtonRemapper {
-    var mapping: [Int: ButtonAction] = [:] { didSet { updateTap() } }
+    var mapping: [Int: ButtonAction] = [:] { didSet { ctx.mapping = mapping; updateTap() } }
     var onDPIAction: ((ButtonAction, Bool) -> Void)? // (action, isDown)
 
-    private var tap: CFMachPort?
-    private var source: CFRunLoopSource?
+    private let ctx = TapContext()
+
+    init() {
+        ctx.onAction = { [weak self] action, down in
+            MainActor.assumeIsolated { self?.perform(action, isDown: down) }
+        }
+    }
 
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
@@ -47,49 +67,53 @@ final class ButtonRemapper {
 
     private var needsTap: Bool { mapping.values.contains { $0 != .standard } }
 
+    /// The tap runs only while a button is remapped AND Accessibility is granted.
     func updateTap() {
-        if needsTap, tap == nil, Self.isTrusted { start() }
-        if !needsTap, tap != nil { stop() }
+        let wanted = needsTap && Self.isTrusted
+        if wanted, ctx.tap == nil { start() }
+        if !wanted, ctx.tap != nil { stop() }
+    }
+
+    /// Removes the tap at once, e.g. before Accessibility is reset. `updateTap()` brings it back.
+    func stop() {
+        guard let tap = ctx.tap else { return }
+        CGEvent.tapEnable(tap: tap, enable: false)
+        CFMachPortInvalidate(tap)
+        if let rl = ctx.runLoop { CFRunLoopStop(rl) }
+        ctx.tap = nil; ctx.runLoop = nil
+        log.notice("button remap: stopped")
     }
 
     private func start() {
         let mask = (1 << CGEventType.otherMouseDown.rawValue) | (1 << CGEventType.otherMouseUp.rawValue)
             | (1 << CGEventType.otherMouseDragged.rawValue)
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        let refcon = Unmanaged.passUnretained(ctx).toOpaque()
         guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                           eventsOfInterest: CGEventMask(mask), callback: tapCallback, userInfo: refcon)
         else { log.error("button remap: event tap could not be created"); return }
-        log.notice("button remap: active")
-        self.tap = tap
-        source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-    }
-
-    private func stop() {
-        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
-        if let tap { CFMachPortInvalidate(tap) }
-        tap = nil; source = nil
-    }
-
-    fileprivate func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            return Unmanaged.passUnretained(event)
+        nonisolated(unsafe) let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) // used only by the tap thread
+        let ctx = ctx
+        let ready = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            ctx.runLoop = CFRunLoopGetCurrent()
+            ready.signal()
+            CFRunLoopRun() // returns when the tap is invalidated in stop()
         }
-        let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
-        guard let action = mapping[button], action != .standard else { return Unmanaged.passUnretained(event) }
-        let isDown = type == .otherMouseDown
-        if type != .otherMouseDragged { perform(action, isDown: isDown) }
-        return nil // swallow the original click
+        thread.name = "MouseR event tap"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        ready.wait()
+        ctx.tap = tap
+        CGEvent.tapEnable(tap: tap, enable: true)
+        log.notice("button remap: active")
     }
 
     private func perform(_ action: ButtonAction, isDown: Bool) {
         switch action {
         case .dpiUp, .dpiDown, .dpiClutch: onDPIAction?(action, isDown)
-        // Back/Forward: run outside the event tap callback, AX calls to other apps can take a moment.
-        case .back where isDown: DispatchQueue.main.async { self.navigate(.back) }
-        case .forward where isDown: DispatchQueue.main.async { self.navigate(.forward) }
+        case .back where isDown: navigate(.back)
+        case .forward where isDown: navigate(.forward)
         // Launching the Mission Control app works; a synthetic ⌃↑ is ignored by macOS.
         case .missionControl where isDown:
             NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/System/Applications/Mission Control.app"),
@@ -146,8 +170,19 @@ final class ButtonRemapper {
 
 }
 
+/// Runs on the tap thread. Must return fast: never does I/O or waits on the main thread.
 private func tapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
     guard let refcon else { return Unmanaged.passUnretained(event) }
-    let remapper = Unmanaged<ButtonRemapper>.fromOpaque(refcon).takeUnretainedValue()
-    return MainActor.assumeIsolated { remapper.handle(type: type, event: event) }
+    let ctx = Unmanaged<TapContext>.fromOpaque(refcon).takeUnretainedValue()
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        if let tap = ctx.tap { CGEvent.tapEnable(tap: tap, enable: true) }
+        return Unmanaged.passUnretained(event)
+    }
+    let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
+    guard let action = ctx.mapping[button], action != .standard else { return Unmanaged.passUnretained(event) }
+    if type != .otherMouseDragged {
+        let isDown = type == .otherMouseDown
+        DispatchQueue.main.async { ctx.onAction?(action, isDown) }
+    }
+    return nil // swallow the original click
 }

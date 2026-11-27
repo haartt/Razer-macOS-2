@@ -26,13 +26,22 @@ struct ContentView: View {
     private var deviceSection: some View {
         Section {
             if let spec = mouse.spec {
-                LabeledContent(spec.name, value: mouse.firmware.map { "Firmware \($0)" } ?? "")
+                LabeledContent {
+                    Text(mouse.firmware.map { "Firmware \($0)" } ?? "")
+                } label: {
+                    Label(spec.name, systemImage: "computermouse")
+                }
                 if let b = mouse.battery {
-                    LabeledContent("Battery", value: "\(b.percent)%" + (b.charging ? " (charging)" : ""))
+                    LabeledContent {
+                        Text("\(b.percent)%" + (b.charging ? ", charging" : ""))
+                    } label: {
+                        Label("Battery", systemImage: batterySymbol(b.percent, charging: b.charging))
+                    }
                 }
             } else {
-                Text(mouse.unsupportedRazer ? "Razer device found, but this model isn't supported yet."
-                                            : "No supported Razer mouse connected.")
+                Label(mouse.unsupportedRazer ? "Razer device found, but this model isn't supported yet."
+                                             : "No supported Razer mouse connected.",
+                      systemImage: "computermouse")
                     .foregroundStyle(.secondary)
             }
         } footer: {
@@ -52,18 +61,23 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 ForEach(mouse.stages.indices, id: \.self) { i in
-                    HStack {
-                        Text("Stage \(i + 1)")
+                    LabeledContent("Stage \(i + 1)") {
                         dpiSlider(Binding(get: { mouse.stages[i] }, set: { mouse.stages[i] = $0 })) { mouse.applyStages() }
-                        Button(role: .destructive) { mouse.removeStage(at: i) } label: { Image(systemName: "minus.circle") }
-                            .buttonStyle(.borderless)
-                            .disabled(mouse.stages.count <= 1)
+                        Button(role: .destructive) { mouse.removeStage(at: i) } label: {
+                            Label("Remove Stage \(i + 1)", systemImage: "minus.circle")
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.borderless)
+                        .help("Remove Stage \(i + 1)")
+                        .disabled(mouse.stages.count <= 1)
                     }
                 }
                 Button("Add Stage", action: mouse.addStage).disabled(mouse.stages.count >= 5)
+                if mouse.hasFactoryDPI {
+                    Button("Reset to Mouse Defaults", action: mouse.resetDPIToFactory)
+                }
             } else if spec.dpi != nil {
-                HStack {
-                    Text("DPI")
+                LabeledContent("DPI") {
                     dpiSlider(Binding(get: { mouse.currentDPI ?? 800 }, set: { mouse.currentDPI = $0 })) { mouse.applyDPI() }
                 }
             }
@@ -105,8 +119,22 @@ struct ContentView: View {
             }
             if z.brightness != nil, state.wrappedValue.effect != .off || effects.isEmpty {
                 Slider(value: state.brightness, in: 0...100,
-                       onEditingChanged: { if !$0 { mouse.applyBrightness(z.zone) } }) { Text("Brightness") }
+                       label: { Text("Brightness") },
+                       minimumValueLabel: { Image(systemName: "sun.min").accessibilityLabel("Dim") },
+                       maximumValueLabel: { Image(systemName: "sun.max").accessibilityLabel("Bright") },
+                       onEditingChanged: { if !$0 { mouse.applyBrightness(z.zone) } })
             }
+        }
+    }
+
+    private func batterySymbol(_ percent: Int, charging: Bool) -> String {
+        if charging { return "battery.100percent.bolt" }
+        switch percent {
+        case 88...: return "battery.100percent"
+        case 63...: return "battery.75percent"
+        case 38...: return "battery.50percent"
+        case 13...: return "battery.25percent"
+        default: return "battery.0percent"
         }
     }
 
@@ -121,6 +149,7 @@ struct ContentView: View {
             if !mouse.accessibilityGranted {
                 Button("Allow Accessibility Access…", action: mouse.requestAccessibility)
             }
+            Button("Reset Accessibility Access", action: mouse.resetAccessibility)
         } header: {
             Text("Buttons")
         } footer: {

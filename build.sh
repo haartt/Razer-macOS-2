@@ -2,7 +2,10 @@
 # Builds MouseR.app into ./build
 set -e
 cd "$(dirname "$0")"
-swift build -c release
+# Stamp the real SDK version in the binary: macOS uses it to pick the design
+# (an old SDK stamp = compatibility look, no Liquid Glass).
+SDK=$(xcrun --show-sdk-version)
+swift build -c release -Xlinker -platform_version -Xlinker macos -Xlinker 14.0 -Xlinker "$SDK"
 APP=build/MouseR.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"

@@ -34,6 +34,9 @@ final class MouseController: ObservableObject {
     /// Lowest DPI that really works. DeathAdder V2 Mini accepts 100 but then runs faster (tested), 200 works.
     private static let minDPIOverride: [Int: Int] = [0x008C: 200]
     var minDPI: Int { spec.flatMap { Self.minDPIOverride[$0.productID] } ?? 100 }
+    /// Factory DPI stages (Razer support spec sheet) and active stage, 0-based.
+    private static let factoryDPI: [Int: (stages: [Int], active: Int)] = [0x008C: ([400, 800, 1600, 2400, 3200], 2)]
+    var hasFactoryDPI: Bool { spec.map { Self.factoryDPI[$0.productID] != nil } ?? false }
 
     private var device: RazerDevice?
     private let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -149,6 +152,15 @@ final class MouseController: ObservableObject {
         applyStages()
     }
 
+    /// Writes the factory DPI stages to the mouse, then reads them back so the app shows what the mouse really holds.
+    func resetDPIToFactory() {
+        guard let d = device, let f = spec.flatMap({ Self.factoryDPI[$0.productID] }) else { return }
+        stages = f.stages; activeStage = f.active
+        applyStages()
+        if let s = d.dpiStages() { stages = s.stages; activeStage = s.active }
+        currentDPI = d.dpi()
+    }
+
     func removeStage(at i: Int) {
         guard stages.count > 1 else { return }
         stages.remove(at: i)
@@ -178,6 +190,20 @@ final class MouseController: ObservableObject {
     }
 
     func requestAccessibility() { ButtonRemapper.requestTrust() }
+
+    /// Removes MouseR from Privacy & Security → Accessibility, so access can be granted again.
+    /// Useful after a rebuild: the new signature no longer matches the old entry, which stays listed but doesn't work.
+    func resetAccessibility() {
+        guard let id = Bundle.main.bundleIdentifier else { return }
+        remapper.stop() // never leave an active tap behind while its permission is being removed
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        p.arguments = ["reset", "Accessibility", id]
+        do { try p.run(); p.waitUntilExit() } catch { log.error("tccutil failed: \(error.localizedDescription, privacy: .public)") }
+        log.notice("tccutil reset Accessibility exit \(p.terminationStatus)")
+        accessibilityGranted = ButtonRemapper.isTrusted
+        remapper.updateTap()
+    }
 
     private func handleDPIButton(_ action: ButtonAction, down: Bool) {
         guard let d = device else { return }
